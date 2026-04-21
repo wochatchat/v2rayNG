@@ -1,30 +1,22 @@
 name: Build Debug APK
 
 on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
+      
+      - uses: android-actions/setup-android@v3
 
-      - name: Setup Android environment
-        uses: android-actions/setup-android@v3
-
-      - name: Download latest libv2ray.aar
+      - name: Download libv2ray.aar
         uses: robinraju/release-downloader@v1
         with:
           repository: '2dust/AndroidLibXrayLite'
@@ -34,12 +26,58 @@ jobs:
 
       - name: Build Debug APK
         run: |
-          cd ${{ github.workspace }}/V2rayNG
+          cd V2rayNG
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      - name: Upload Debug APK
+      - name: Organize APKs to root directory
+        run: |
+          # 创建输出目录结构
+          mkdir -p ${{ github.workspace }}/apks/arm64-v8a
+          mkdir -p ${{ github.workspace }}/apks/armeabi-v7a
+          mkdir -p ${{ github.workspace }}/apks/x86_64
+          mkdir -p ${{ github.workspace }}/apks/x86
+          mkdir -p ${{ github.workspace }}/apks/universal
+          
+          # 获取版本号和构建时间
+          VERSION=$(grep -m1 "versionName" V2rayNG/app/build.gradle | sed 's/.*"\(.*\)".*/\1/' | tr -d ' ')
+          BUILD_TIME=$(date +"%Y%m%d_%H%M%S")
+          SHORT_SHA=${{ github.sha }} | cut -c1-7
+          
+          echo "Version: $VERSION"
+          echo "Build Time: $BUILD_TIME"
+          echo "Commit: $SHORT_SHA"
+          
+          # 查找所有生成的 APK 文件
+          find V2rayNG/app/build/outputs/apk -name "*.apk" -type f | while read apk; do
+            # 提取架构信息
+            if echo "$apk" | grep -q "arm64-v8a"; then
+              ARCH="arm64-v8a"
+            elif echo "$apk" | grep -q "armeabi-v7a"; then
+              ARCH="armeabi-v7a"
+            elif echo "$apk" | grep -q "x86_64"; then
+              ARCH="x86_64"
+            elif echo "$apk" | grep -q "x86"; then
+              ARCH="x86"
+            else
+              ARCH="universal"
+            fi
+            
+            # 构建新文件名：v2rayNG_v{版本}_{架构}_{日期}_{commit}.apk
+            NEW_NAME="v2rayNG_v${VERSION}_${ARCH}_${BUILD_TIME}_${SHORT_SHA}.apk"
+            
+            # 复制到对应架构文件夹
+            cp "$apk" "${{ github.workspace }}/apks/${ARCH}/${NEW_NAME}"
+            echo "Copied: $apk -> apks/${ARCH}/${NEW_NAME}"
+          done
+          
+          # 列出最终结构
+          echo "=== Final APK Structure ==="
+          find ${{ github.workspace }}/apks -type f | sort
+
+      - name: Upload organized APKs
         uses: actions/upload-artifact@v4
         with:
-          name: debug-apk
-          path: ${{ github.workspace }}/V2rayNG/app/build/outputs/apk/debug/*.apk
+          name: v2rayNG-apks
+          path: apks/
+          retention-days: 30
