@@ -28,29 +28,34 @@ jobs:
         run: |
           cd V2rayNG
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew clean assembleDebug
+
+      # ===== 关键调试步骤：先看 APK 到底在哪 =====
+      - name: Debug - Find all APK files
+        run: |
+          echo "=== 查找所有 APK ==="
+          find . -name "*.apk" -type f 2>/dev/null || echo "没有找到 APK"
+          
+          echo "=== build/outputs 完整结构 ==="
+          find V2rayNG/app/build/outputs -type f 2>/dev/null || echo "目录不存在"
 
       - name: Organize APKs to root directory
         run: |
-          # 创建输出目录结构
-          mkdir -p ${{ github.workspace }}/apks/arm64-v8a
-          mkdir -p ${{ github.workspace }}/apks/armeabi-v7a
-          mkdir -p ${{ github.workspace }}/apks/x86_64
-          mkdir -p ${{ github.workspace }}/apks/x86
-          mkdir -p ${{ github.workspace }}/apks/universal
+          mkdir -p apks/arm64-v8a apks/armeabi-v7a apks/x86_64 apks/x86 apks/universal
           
-          # 获取版本号和构建时间
-          VERSION=$(grep -m1 "versionName" V2rayNG/app/build.gradle | sed 's/.*"\(.*\)".*/\1/' | tr -d ' ')
+          # 获取元数据
+          VERSION=$(grep -m1 "versionName" V2rayNG/app/build.gradle | sed 's/.*"\(.*\)".*/\1/' | tr -d ' ' || echo "unknown")
           BUILD_TIME=$(date +"%Y%m%d_%H%M%S")
-          SHORT_SHA=${{ github.sha }} | cut -c1-7
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
           
-          echo "Version: $VERSION"
-          echo "Build Time: $BUILD_TIME"
-          echo "Commit: $SHORT_SHA"
+          echo "Version: $VERSION, Time: $BUILD_TIME, SHA: $SHORT_SHA"
           
-          # 查找所有生成的 APK 文件
-          find V2rayNG/app/build/outputs/apk -name "*.apk" -type f | while read apk; do
-            # 提取架构信息
+          # 递归查找所有 APK
+          APK_COUNT=0
+          find V2rayNG/app/build/outputs/apk -name "*.apk" -type f 2>/dev/null | while read apk; do
+            APK_COUNT=$((APK_COUNT + 1))
+            
+            # 从路径判断架构
             if echo "$apk" | grep -q "arm64-v8a"; then
               ARCH="arm64-v8a"
             elif echo "$apk" | grep -q "armeabi-v7a"; then
@@ -63,17 +68,13 @@ jobs:
               ARCH="universal"
             fi
             
-            # 构建新文件名：v2rayNG_v{版本}_{架构}_{日期}_{commit}.apk
             NEW_NAME="v2rayNG_v${VERSION}_${ARCH}_${BUILD_TIME}_${SHORT_SHA}.apk"
-            
-            # 复制到对应架构文件夹
-            cp "$apk" "${{ github.workspace }}/apks/${ARCH}/${NEW_NAME}"
-            echo "Copied: $apk -> apks/${ARCH}/${NEW_NAME}"
+            cp "$apk" "apks/${ARCH}/${NEW_NAME}"
+            echo "[$APK_COUNT] $apk -> apks/${ARCH}/${NEW_NAME}"
           done
           
-          # 列出最终结构
-          echo "=== Final APK Structure ==="
-          find ${{ github.workspace }}/apks -type f | sort
+          echo "=== 最终文件 ==="
+          find apks -type f | sort || echo "apks 目录为空！"
 
       - name: Upload organized APKs
         uses: actions/upload-artifact@v4
