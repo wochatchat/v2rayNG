@@ -39,58 +39,63 @@ jobs:
             exit 1
           fi
 
-      # ===== 关键修改：只构建 arm64-v8a 和 universal =====
-      - name: Build Debug APK (arm64-v8a + universal)
+      - name: Build Debug APK
         run: |
           cd V2rayNG
           chmod +x gradlew
-          ./gradlew clean assembleDebug \
-            -Pandroid.injected.build.abi=arm64-v8a \
-            -Pandroid.injected.build.abi=universal \
-            || ./gradlew clean assembleArm64_v8aDebug assembleUniversalDebug
+          ./gradlew clean assembleDebug
 
-      - name: Verify APK
+      # ===== 直接复制到仓库根目录 apks/ =====
+      - name: Copy APKs to root directory
         run: |
-          echo "=== 所有生成的 APK ==="
-          find V2rayNG/app/build/outputs/apk -name "*.apk" | sort
-          
-          echo "=== native 库检查 ==="
-          for apk in $(find V2rayNG/app/build/outputs/apk -name "*.apk"); do
-            echo "--- $(basename $apk) ---"
-            unzip -l "$apk" | grep "lib/" | head -10
-          done
-
-      # ===== 只整理 arm64-v8a 和 universal =====
-      - name: Organize APKs
-        run: |
-          mkdir -p apks/arm64-v8a apks/universal
+          # 在仓库根目录创建 apks 文件夹
+          mkdir -p ${{ github.workspace }}/apks/arm64-v8a
+          mkdir -p ${{ github.workspace }}/apks/universal
           
           VERSION=$(grep -m1 "versionName" V2rayNG/app/build.gradle | sed 's/.*"\(.*\)".*/\1/' | tr -d ' ' || echo "unknown")
           BUILD_TIME=$(date +"%Y%m%d_%H%M%S")
           SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
           
-          find V2rayNG/app/build/outputs/apk -name "*.apk" | while read apk; do
+          echo "Version: $VERSION"
+          echo "Build: $BUILD_TIME"
+          echo "Commit: $SHORT_SHA"
+          
+          # 从整个项目搜索 APK 并复制到根目录
+          find . -name "*.apk" -type f | while read apk; do
+            echo "发现: $apk"
+            
+            # 判断架构
             if echo "$apk" | grep -q "arm64-v8a"; then
               ARCH="arm64-v8a"
             elif echo "$apk" | grep -q "universal"; then
               ARCH="universal"
             else
-              # 跳过其他架构
-              echo "跳过: $(basename $apk)"
-              continue
+              # 根据文件名判断
+              if echo "$(basename $apk)" | grep -q "arm64"; then
+                ARCH="arm64-v8a"
+              else
+                ARCH="universal"
+              fi
             fi
             
             NEW_NAME="v2rayNG_v${VERSION}_${ARCH}_debug_${BUILD_TIME}_${SHORT_SHA}.apk"
-            cp "$apk" "apks/${ARCH}/${NEW_NAME}"
-            echo "-> apks/${ARCH}/${NEW_NAME}"
+            cp "$apk" "${{ github.workspace }}/apks/${ARCH}/${NEW_NAME}"
+            echo "已复制到: apks/${ARCH}/${NEW_NAME}"
           done
           
           echo "=== 最终结构 ==="
-          find apks -type f | sort
+          find ${{ github.workspace }}/apks -type f | sort
+          
+          # 检查是否为空
+          if [ -z "$(find ${{ github.workspace }}/apks -type f)" ]; then
+            echo "ERROR: 没有找到任何 APK！"
+            exit 1
+          fi
 
-      - name: Upload Debug APKs
+      # ===== 从根目录上传 Artifact =====
+      - name: Upload APKs from root
         uses: actions/upload-artifact@v4
         with:
           name: v2rayNG-debug-apks
-          path: apks/
+          path: ${{ github.workspace }}/apks/
           retention-days: 30
