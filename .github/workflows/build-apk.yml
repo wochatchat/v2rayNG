@@ -17,48 +17,41 @@ jobs:
       
       - uses: android-actions/setup-android@v3
 
-      # ===== 下载最新版 libv2ray.aar（与代码匹配）=====
       - name: Download latest libv2ray.aar
         run: |
           mkdir -p V2rayNG/app/libs
           rm -f V2rayNG/app/libs/libv2ray.aar
           
-          # 方案1：从 AndroidLibXrayLite 最新 release 下载
-          echo "尝试从 AndroidLibXrayLite 下载最新 aar..."
           wget --timeout=60 -O V2rayNG/app/libs/libv2ray.aar \
             "https://github.com/2dust/AndroidLibXrayLite/releases/latest/download/libv2ray.aar" \
             2>/dev/null || true
           
-          # 方案2：如果方案1失败，尝试从 v2rayNG release 下载
           if [ ! -s V2rayNG/app/libs/libv2ray.aar ]; then
-            echo "方案1失败，尝试从 v2rayNG release 下载..."
             wget --timeout=60 -O V2rayNG/app/libs/libv2ray.aar \
               "https://github.com/2dust/v2rayNG/releases/latest/download/libv2ray.aar" \
               2>/dev/null || true
           fi
           
-          # 验证
-          echo "=== aar 文件信息 ==="
-          ls -lh V2rayNG/app/libs/libv2ray.aar 2>/dev/null || echo "文件不存在！"
+          ls -lh V2rayNG/app/libs/libv2ray.aar
           
           if [ ! -f V2rayNG/app/libs/libv2ray.aar ] || [ ! -s V2rayNG/app/libs/libv2ray.aar ]; then
-            echo "ERROR: libv2ray.aar 下载失败，请检查下载链接"
+            echo "ERROR: libv2ray.aar 下载失败"
             exit 1
           fi
-          
-          # 检查 aar 里是否包含需要的类
-          echo "=== 检查 aar 内容 ==="
-          unzip -l V2rayNG/app/libs/libv2ray.aar | grep -E "(classes|\.so|Core)" | head -30
 
-      - name: Build Debug APK
+      # ===== 关键修改：只构建 arm64-v8a 和 universal =====
+      - name: Build Debug APK (arm64-v8a + universal)
         run: |
           cd V2rayNG
           chmod +x gradlew
-          ./gradlew clean assembleDebug
+          ./gradlew clean assembleDebug \
+            -Pandroid.injected.build.abi=arm64-v8a \
+            -Pandroid.injected.build.abi=universal \
+            || ./gradlew clean assembleArm64_v8aDebug assembleUniversalDebug
 
       - name: Verify APK
         run: |
-          echo "=== 所有 APK ==="
+          echo "=== 所有生成的 APK ==="
           find V2rayNG/app/build/outputs/apk -name "*.apk" | sort
           
           echo "=== native 库检查 ==="
@@ -67,24 +60,29 @@ jobs:
             unzip -l "$apk" | grep "lib/" | head -10
           done
 
+      # ===== 只整理 arm64-v8a 和 universal =====
       - name: Organize APKs
         run: |
-          mkdir -p apks/arm64-v8a apks/armeabi-v7a apks/x86_64 apks/x86 apks/universal
+          mkdir -p apks/arm64-v8a apks/universal
           
           VERSION=$(grep -m1 "versionName" V2rayNG/app/build.gradle | sed 's/.*"\(.*\)".*/\1/' | tr -d ' ' || echo "unknown")
           BUILD_TIME=$(date +"%Y%m%d_%H%M%S")
           SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
           
           find V2rayNG/app/build/outputs/apk -name "*.apk" | while read apk; do
-            if echo "$apk" | grep -q "arm64-v8a"; then ARCH="arm64-v8a"
-            elif echo "$apk" | grep -q "armeabi-v7a"; then ARCH="armeabi-v7a"
-            elif echo "$apk" | grep -q "x86_64"; then ARCH="x86_64"
-            elif echo "$apk" | grep -q "x86"; then ARCH="x86"
-            else ARCH="universal"
+            if echo "$apk" | grep -q "arm64-v8a"; then
+              ARCH="arm64-v8a"
+            elif echo "$apk" | grep -q "universal"; then
+              ARCH="universal"
+            else
+              # 跳过其他架构
+              echo "跳过: $(basename $apk)"
+              continue
             fi
             
             NEW_NAME="v2rayNG_v${VERSION}_${ARCH}_debug_${BUILD_TIME}_${SHORT_SHA}.apk"
             cp "$apk" "apks/${ARCH}/${NEW_NAME}"
+            echo "-> apks/${ARCH}/${NEW_NAME}"
           done
           
           echo "=== 最终结构 ==="
