@@ -1,11 +1,17 @@
-name: Build Debug APK
+name: Build Release APK (Fixed)
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag'
+        required: true
+        type: string
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    
     steps:
       - uses: actions/checkout@v4
       
@@ -16,69 +22,87 @@ jobs:
       
       - uses: android-actions/setup-android@v3
 
-      - name: Download libv2ray.aar
-        uses: robinraju/release-downloader@v1
-        with:
-          repository: '2dust/AndroidLibXrayLite'
-          latest: true
-          fileName: 'libv2ray.aar'
-          out-file-path: '${{ github.workspace }}/V2rayNG/app/libs/'
+      # ===== 关键修复：下载与代码版本匹配的 aar =====
+      - name: Download compatible libv2ray.aar
+        run: |
+          # 先删除可能存在的旧文件
+          mkdir -p V2rayNG/app/libs
+          rm -f V2rayNG/app/libs/libv2ray.aar
+          
+          # 从原版 release 下载稳定版 aar（修改版本号为你需要的）
+          wget --timeout=60 -O V2rayNG/app/libs/libv2ray.aar \
+            https://github.com/2dust/AndroidLibXrayLite/releases/download/v25.1.1/libv2ray.aar \
+            || wget --timeout=60 -O V2rayNG/app/libs/libv2ray.aar \
+            https://github.com/2dust/v2rayNG/releases/download/1.9.9/libv2ray.aar
+          
+          echo "=== 验证 aar ==="
+          ls -lh V2rayNG/app/libs/libv2ray.aar
+          
+          # 检查文件是否有效（aar 是 zip 格式）
+          if ! unzip -t V2rayNG/app/libs/libv2ray.aar > /dev/null 2>&1; then
+            echo "ERROR: aar 文件损坏或下载失败"
+            exit 1
+          fi
+          
+          echo "=== aar 内容预览 ==="
+          unzip -l V2rayNG/app/libs/libv2ray.aar | grep -E "(AndroidManifest|classes|\.so)" | head -20
 
-      - name: Build Debug APK
+      - name: Decode Keystore
+        uses: timheuer/base64-to-file@v1
+        id: android_keystore
+        with:
+          fileName: "android_keystore.jks"
+          encodedString: ${{ secrets.KEYSTORE }}
+
+      - name: Build Release APK
         run: |
           cd V2rayNG
           chmod +x gradlew
-          ./gradlew clean assembleDebug
+          ./gradlew licenseFdroidReleaseReport
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=${{ steps.android_keystore.outputs.filePath }} \
+            -Pandroid.injected.signing.store.password=${{ secrets.KEY_STORE_PASSWORD }} \
+            -Pandroid.injected.signing.key.alias=${{ secrets.ALIAS }} \
+            -Pandroid.injected.signing.key.password=${{ secrets.KEY_PASSWORD }}
 
-      # ===== 关键调试步骤：先看 APK 到底在哪 =====
-      - name: Debug - Find all APK files
+      # ===== 关键验证：确认 so 文件在 APK 里 =====
+      - name: Verify APK integrity
         run: |
           echo "=== 查找所有 APK ==="
-          find . -name "*.apk" -type f 2>/dev/null || echo "没有找到 APK"
+          find V2rayNG/app/build/outputs/apk -name "*.apk" | sort
           
-          echo "=== build/outputs 完整结构 ==="
-          find V2rayNG/app/build/outputs -type f 2>/dev/null || echo "目录不存在"
-
-      - name: Organize APKs to root directory
-        run: |
-          mkdir -p apks/arm64-v8a apks/armeabi-v7a apks/x86_64 apks/x86 apks/universal
-          
-          # 获取元数据
-          VERSION=$(grep -m1 "versionName" V2rayNG/app/build.gradle | sed 's/.*"\(.*\)".*/\1/' | tr -d ' ' || echo "unknown")
-          BUILD_TIME=$(date +"%Y%m%d_%H%M%S")
-          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
-          
-          echo "Version: $VERSION, Time: $BUILD_TIME, SHA: $SHORT_SHA"
-          
-          # 递归查找所有 APK
-          APK_COUNT=0
-          find V2rayNG/app/build/outputs/apk -name "*.apk" -type f 2>/dev/null | while read apk; do
-            APK_COUNT=$((APK_COUNT + 1))
-            
-            # 从路径判断架构
-            if echo "$apk" | grep -q "arm64-v8a"; then
-              ARCH="arm64-v8a"
-            elif echo "$apk" | grep -q "armeabi-v7a"; then
-              ARCH="armeabi-v7a"
-            elif echo "$apk" | grep -q "x86_64"; then
-              ARCH="x86_64"
-            elif echo "$apk" | grep -q "x86"; then
-              ARCH="x86"
-            else
-              ARCH="universal"
-            fi
-            
-            NEW_NAME="v2rayNG_v${VERSION}_${ARCH}_${BUILD_TIME}_${SHORT_SHA}.apk"
-            cp "$apk" "apks/${ARCH}/${NEW_NAME}"
-            echo "[$APK_COUNT] $apk -> apks/${ARCH}/${NEW_NAME}"
+          echo "=== 检查每个 APK 的 so 文件 ==="
+          for apk in $(find V2rayNG/app/build/outputs/apk -name "*.apk"); do
+            echo "--- $apk ---"
+            unzip -l "$apk" | grep "\.so" | head -10
           done
-          
-          echo "=== 最终文件 ==="
-          find apks -type f | sort || echo "apks 目录为空！"
 
-      - name: Upload organized APKs
+      - name: Organize APKs
+        run: |
+          mkdir -p apks/arm64-v8a apks/armeabi-v7a apks/x86_64 apks/x86
+          VERSION="${{ github.event.inputs.release_tag }}"
+          BUILD_TIME=$(date +"%Y%m%d")
+          
+          find V2rayNG/app/build/outputs/apk -name "*release*.apk" | while read apk; do
+            if echo "$apk" | grep -q "arm64-v8a"; then ARCH="arm64-v8a"
+            elif echo "$apk" | grep -q "armeabi-v7a"; then ARCH="armeabi-v7a"
+            elif echo "$apk" | grep -q "x86_64"; then ARCH="x86_64"
+            elif echo "$apk" | grep -q "x86"; then ARCH="x86"
+            else ARCH="universal"
+            fi
+            cp "$apk" "apks/${ARCH}/v2rayNG_${VERSION}_${ARCH}_${BUILD_TIME}.apk"
+          done
+
+      - name: Upload to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: v2rayNG-apks
+          name: v2rayNG-release-${{ github.event.inputs.release_tag }}
           path: apks/
-          retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          files: apks/**/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
