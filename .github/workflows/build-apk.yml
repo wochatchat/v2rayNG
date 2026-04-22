@@ -1,12 +1,7 @@
-name: Build Release APK (Fixed)
+name: Build Debug APK
 
 on:
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: 'Release tag'
-        required: true
-        type: string
 
 jobs:
   build:
@@ -25,84 +20,95 @@ jobs:
       # ===== 关键修复：下载与代码版本匹配的 aar =====
       - name: Download compatible libv2ray.aar
         run: |
-          # 先删除可能存在的旧文件
           mkdir -p V2rayNG/app/libs
           rm -f V2rayNG/app/libs/libv2ray.aar
           
-          # 从原版 release 下载稳定版 aar（修改版本号为你需要的）
+          # 尝试从 AndroidLibXrayLite 下载
           wget --timeout=60 -O V2rayNG/app/libs/libv2ray.aar \
             https://github.com/2dust/AndroidLibXrayLite/releases/download/v25.1.1/libv2ray.aar \
-            || wget --timeout=60 -O V2rayNG/app/libs/libv2ray.aar \
-            https://github.com/2dust/v2rayNG/releases/download/1.9.9/libv2ray.aar
+            2>/dev/null || true
           
-          echo "=== 验证 aar ==="
-          ls -lh V2rayNG/app/libs/libv2ray.aar
-          
-          # 检查文件是否有效（aar 是 zip 格式）
-          if ! unzip -t V2rayNG/app/libs/libv2ray.aar > /dev/null 2>&1; then
-            echo "ERROR: aar 文件损坏或下载失败"
-            exit 1
+          # 如果失败，从原版 v2rayNG release 提取（备用）
+          if [ ! -s V2rayNG/app/libs/libv2ray.aar ]; then
+            echo "从 AndroidLibXrayLite 下载失败，尝试备用方案..."
+            wget --timeout=60 -O /tmp/v2rayng_official.apk \
+              https://github.com/2dust/v2rayNG/releases/download/1.9.9/v2rayNG_1.9.9_arm64-v8a.apk \
+              2>/dev/null || true
+            
+            # 从官方 APK 提取 aar 里的 so 文件（临时方案）
+            if [ -f /tmp/v2rayng_official.apk ]; then
+              mkdir -p /tmp/extract
+              unzip -o /tmp/v2rayng_official.apk -d /tmp/extract/
+              # 这里只是验证 so 存在，aar 还是需要正确来源
+            fi
           fi
           
-          echo "=== aar 内容预览 ==="
-          unzip -l V2rayNG/app/libs/libv2ray.aar | grep -E "(AndroidManifest|classes|\.so)" | head -20
+          # 最终检查
+          echo "=== aar 文件信息 ==="
+          ls -lh V2rayNG/app/libs/libv2ray.aar 2>/dev/null || echo "文件不存在！"
+          
+          if [ -f V2rayNG/app/libs/libv2ray.aar ] && [ -s V2rayNG/app/libs/libv2ray.aar ]; then
+            echo "=== 验证 aar 内容 ==="
+            unzip -l V2rayNG/app/libs/libv2ray.aar | grep -E "(\.so|classes|AndroidManifest)" | head -20
+          else
+            echo "ERROR: libv2ray.aar 下载失败或为空"
+            exit 1
+          fi
 
-      - name: Decode Keystore
-        uses: timheuer/base64-to-file@v1
-        id: android_keystore
-        with:
-          fileName: "android_keystore.jks"
-          encodedString: ${{ secrets.KEYSTORE }}
-
-      - name: Build Release APK
+      # ===== Debug 构建（自动使用 debug.keystore）=====
+      - name: Build Debug APK
         run: |
           cd V2rayNG
           chmod +x gradlew
-          ./gradlew licenseFdroidReleaseReport
-          ./gradlew assembleRelease \
-            -Pandroid.injected.signing.store.file=${{ steps.android_keystore.outputs.filePath }} \
-            -Pandroid.injected.signing.store.password=${{ secrets.KEY_STORE_PASSWORD }} \
-            -Pandroid.injected.signing.key.alias=${{ secrets.ALIAS }} \
-            -Pandroid.injected.signing.key.password=${{ secrets.KEY_PASSWORD }}
+          ./gradlew clean assembleDebug
 
-      # ===== 关键验证：确认 so 文件在 APK 里 =====
+      # ===== 验证 APK 完整性 =====
       - name: Verify APK integrity
         run: |
-          echo "=== 查找所有 APK ==="
+          echo "=== 所有生成的 APK ==="
           find V2rayNG/app/build/outputs/apk -name "*.apk" | sort
           
-          echo "=== 检查每个 APK 的 so 文件 ==="
+          echo ""
+          echo "=== 检查每个 APK 的 native 库 ==="
           for apk in $(find V2rayNG/app/build/outputs/apk -name "*.apk"); do
-            echo "--- $apk ---"
-            unzip -l "$apk" | grep "\.so" | head -10
+            echo "--- $(basename $apk) ---"
+            unzip -l "$apk" | grep "lib/" | head -10
+            echo ""
           done
 
+      # ===== 整理到根目录 apks/ =====
       - name: Organize APKs
         run: |
-          mkdir -p apks/arm64-v8a apks/armeabi-v7a apks/x86_64 apks/x86
-          VERSION="${{ github.event.inputs.release_tag }}"
-          BUILD_TIME=$(date +"%Y%m%d")
+          mkdir -p apks/arm64-v8a apks/armeabi-v7a apks/x86_64 apks/x86 apks/universal
           
-          find V2rayNG/app/build/outputs/apk -name "*release*.apk" | while read apk; do
+          VERSION=$(grep -m1 "versionName" V2rayNG/app/build.gradle | sed 's/.*"\(.*\)".*/\1/' | tr -d ' ' || echo "unknown")
+          BUILD_TIME=$(date +"%Y%m%d_%H%M%S")
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          
+          echo "Version: $VERSION"
+          echo "Build: $BUILD_TIME"
+          echo "Commit: $SHORT_SHA"
+          
+          find V2rayNG/app/build/outputs/apk -name "*debug*.apk" -o -name "*.apk" | while read apk; do
+            # 从路径判断架构
             if echo "$apk" | grep -q "arm64-v8a"; then ARCH="arm64-v8a"
             elif echo "$apk" | grep -q "armeabi-v7a"; then ARCH="armeabi-v7a"
             elif echo "$apk" | grep -q "x86_64"; then ARCH="x86_64"
             elif echo "$apk" | grep -q "x86"; then ARCH="x86"
             else ARCH="universal"
             fi
-            cp "$apk" "apks/${ARCH}/v2rayNG_${VERSION}_${ARCH}_${BUILD_TIME}.apk"
+            
+            NEW_NAME="v2rayNG_v${VERSION}_${ARCH}_debug_${BUILD_TIME}_${SHORT_SHA}.apk"
+            cp "$apk" "apks/${ARCH}/${NEW_NAME}"
+            echo "-> apks/${ARCH}/${NEW_NAME}"
           done
+          
+          echo "=== 最终结构 ==="
+          find apks -type f | sort
 
-      - name: Upload to Artifacts
+      - name: Upload Debug APKs
         uses: actions/upload-artifact@v4
         with:
-          name: v2rayNG-release-${{ github.event.inputs.release_tag }}
+          name: v2rayNG-debug-apks
           path: apks/
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ github.event.inputs.release_tag }}
-          files: apks/**/*.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          retention-days: 30
